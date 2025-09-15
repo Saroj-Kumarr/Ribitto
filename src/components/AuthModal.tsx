@@ -7,6 +7,16 @@ import { Card, CardContent, CardHeader, CardTitle } from "./ui/card";
 import { X, User, CheckCircle, Shield } from "lucide-react";
 import { toast } from "sonner";
 import ribittoLogo from "figma:asset/ec1e75f1b926da771035c7dced21711c27a89f1b.png";
+import Select from "react-select";
+import {
+  Country,
+  State,
+  City,
+  ICountry,
+  IState,
+  ICity,
+} from "country-state-city";
+import OtpInputs from "./OTPInputs";
 
 interface Props {
   onClose: () => void;
@@ -16,6 +26,7 @@ interface Props {
     otp: string
   ) => Promise<{ exists: boolean; user?: any }>;
   onAuthSuccess?: (user?: any) => void;
+  onLogin: (email: string, password: string, role?: any) => Promise<any>;
 }
 
 const OTP_EXPIRY_SECONDS = 300;
@@ -30,6 +41,7 @@ export default function AuthModalSingleFlowFinal({
   onRequestOtp,
   onVerifyOtp,
   onAuthSuccess,
+  onLogin,
 }: Props) {
   const [step, setStep] = useState<"phone" | "otp" | "register">("phone");
   const [phone, setPhone] = useState(""); // user input (no +91)
@@ -43,15 +55,18 @@ export default function AuthModalSingleFlowFinal({
   const [otpInput, setOtpInput] = useState("");
   const [timer, setTimer] = useState(0);
 
-  // Register states + field errors
   const [reg, setReg] = useState({
     name: "",
     email: "",
     phone: "",
-    location: "",
+    location: "", // keep if you like; we’ll derive it on submit
     password: "",
     confirmPassword: "",
+    country: "", // NEW: ISO code, e.g. "IN"
+    state: "", // NEW: ISO code (within country), e.g. "MH"
+    city: "", // NEW: city name
   });
+
   const [fieldErrors, setFieldErrors] = useState<
     Partial<Record<keyof typeof reg, string>>
   >({});
@@ -59,6 +74,35 @@ export default function AuthModalSingleFlowFinal({
   const [agreed, setAgreed] = useState(false);
 
   const otpRef = useRef<HTMLInputElement | null>(null);
+
+  // react-select expects { value, label }
+  type Opt = { value: string; label: string; meta?: any };
+
+  const countryOptions: Opt[] = Country.getAllCountries().map(
+    (c: ICountry) => ({
+      value: c.isoCode, // e.g. "IN"
+      label: c.name, // "India"
+      meta: c,
+    })
+  );
+
+  const stateOptions: Opt[] = React.useMemo(() => {
+    if (!reg.country) return [];
+    return State.getStatesOfCountry(reg.country).map((s: IState) => ({
+      value: s.isoCode, // e.g. "MH"
+      label: s.name, // "Maharashtra"
+      meta: s,
+    }));
+  }, [reg.country]);
+
+  const cityOptions: Opt[] = React.useMemo(() => {
+    if (!reg.country || !reg.state) return [];
+    return City.getCitiesOfState(reg.country, reg.state).map((c: ICity) => ({
+      value: c.name,
+      label: c.name,
+      meta: c,
+    }));
+  }, [reg.country, reg.state]);
 
   // Demo accounts (UI only)
   const demoAccounts = [
@@ -87,6 +131,29 @@ export default function AuthModalSingleFlowFinal({
       role: "admin",
     },
   ];
+
+  const handleLogin = async (email: string, password: string) => {
+    setIsLoading(true);
+
+    try {
+      // Demo login with different user types
+      let userType = "registered";
+
+      if (email.includes("admin")) {
+        userType = "admin";
+      } else if (email.includes("kyc")) {
+        userType = "kyc";
+      }
+
+      await onLogin(email, password, userType);
+      toast.success("Welcome to Ribitto! Login successful.");
+      onClose();
+    } catch (error) {
+      toast.error("Login failed. Please check your credentials.");
+    } finally {
+      setIsLoading(false);
+    }
+  };
 
   // OTP countdown
   useEffect(() => {
@@ -232,10 +299,11 @@ export default function AuthModalSingleFlowFinal({
       setFieldError("email", "Invalid email address");
       ok = false;
     }
-    if (!reg.location.trim()) {
-      setFieldError("location", "Location is required");
+    if (!reg.country || !reg.state || !reg.city) {
+      setFieldError("location", "Please select country, state, and city");
       ok = false;
     }
+
     if (reg.password.length < 8) {
       setFieldError("password", "Password must be at least 8 characters");
       ok = false;
@@ -244,11 +312,16 @@ export default function AuthModalSingleFlowFinal({
       setFieldError("confirmPassword", "Passwords do not match");
       ok = false;
     }
+
     if (!ok) return;
     if (!agreed) {
       setGeneralError("You must accept Terms & Privacy");
       return;
     }
+
+    // inside handleRegisterSubmit, after all validations pass:
+    const composedLocation = `${reg.city}, ${reg.state}, ${reg.country}`;
+    setReg((r) => ({ ...r, location: composedLocation }));
 
     // Frontend-only: backend will create user
     toast.success("Registration completed (frontend-only)");
@@ -266,6 +339,8 @@ export default function AuthModalSingleFlowFinal({
       role: account.role || account.type,
     };
     toast.success(`Logged in as ${account.type}`);
+
+    handleLogin(account.email, "demopassword");
     onAuthSuccess?.(demoUser);
     onClose();
   };
@@ -302,7 +377,12 @@ export default function AuthModalSingleFlowFinal({
                   id="phone"
                   placeholder="Enter your 10-digit mobile number (e.g. 9876543210)"
                   value={phone}
-                  onChange={(e) => setPhone(e.target.value)}
+                  onChange={(e) => {
+                    const digits = e.target.value
+                      .replace(/\D/g, "")
+                      .slice(0, 10);
+                    setPhone(digits);
+                  }}
                   className="input-modern"
                 />
               </div>
@@ -322,15 +402,14 @@ export default function AuthModalSingleFlowFinal({
           {step === "otp" && (
             <form onSubmit={handleVerify} className="space-y-4">
               <Label>Enter OTP</Label>
-              <Input
-                ref={otpRef}
+              <OtpInputs
+                length={6}
                 value={otpInput}
-                onChange={(e) =>
-                  setOtpInput(e.target.value.replace(/\D/g, "").slice(0, 6))
+                onChange={(next) =>
+                  setOtpInput(next.replace(/\D/g, "").slice(0, 6))
                 }
-                placeholder="Enter the 6-digit OTP"
-                className="input-modern text-center"
               />
+
               {fieldErrors.phone && (
                 <p className="text-red-600 text-sm mt-1">{fieldErrors.phone}</p>
               )}
@@ -431,10 +510,13 @@ export default function AuthModalSingleFlowFinal({
                   <div className="flex mt-1">
                     <div className="inline-flex items-center px-3 ">+91</div>
                     <Input
-                      value={reg.phone || `${normalizedPhone(phone)}`}
-                      onChange={(e) =>
-                        setReg({ ...reg, phone: e.target.value })
-                      }
+                      value={reg.phone}
+                      onChange={(e) => {
+                        const digits = e.target.value
+                          .replace(/\D/g, "")
+                          .slice(0, 10);
+                        setReg((r) => ({ ...r, phone: digits })); // allow empty too
+                      }}
                       placeholder="9876543210"
                       className="input-modern mt-2"
                     />
@@ -446,16 +528,70 @@ export default function AuthModalSingleFlowFinal({
                   )}
                 </div>
 
-                <div>
-                  <Label>Location</Label>
-                  <Input
-                    value={reg.location}
-                    onChange={(e) =>
-                      setReg({ ...reg, location: e.target.value })
-                    }
-                    placeholder="country, state and city"
-                    className="input-modern mt-2"
-                  />
+                {/* Country */}
+                <div className="sm:col-span-1">
+                  <Label>Country</Label>
+                  <div className="mt-2">
+                    <Select
+                      options={countryOptions}
+                      value={
+                        countryOptions.find((o) => o.value === reg.country) ||
+                        null
+                      }
+                      onChange={(opt) => {
+                        setReg((r) => ({
+                          ...r,
+                          country: opt?.value || "",
+                          state: "", // reset downstream
+                          city: "",
+                        }));
+                      }}
+                      placeholder="Select country"
+                      classNamePrefix="rs"
+                    />
+                  </div>
+                </div>
+
+                {/* State */}
+                <div className="sm:col-span-1">
+                  <Label>State</Label>
+                  <div className="mt-2">
+                    <Select
+                      isDisabled={!reg.country}
+                      options={stateOptions}
+                      value={
+                        stateOptions.find((o) => o.value === reg.state) || null
+                      }
+                      onChange={(opt) => {
+                        setReg((r) => ({
+                          ...r,
+                          state: opt?.value || "",
+                          city: "",
+                        }));
+                      }}
+                      placeholder="Select state"
+                      classNamePrefix="rs"
+                    />
+                  </div>
+                </div>
+
+                {/* City */}
+                <div className="sm:col-span-1">
+                  <Label>City</Label>
+                  <div className="mt-2">
+                    <Select
+                      isDisabled={!reg.country || !reg.state}
+                      options={cityOptions}
+                      value={
+                        cityOptions.find((o) => o.value === reg.city) || null
+                      }
+                      onChange={(opt) =>
+                        setReg((r) => ({ ...r, city: opt?.value || "" }))
+                      }
+                      placeholder="Select city"
+                      classNamePrefix="rs"
+                    />
+                  </div>
                   {fieldErrors.location && (
                     <p className="text-red-600 text-sm mt-1">
                       {fieldErrors.location}
